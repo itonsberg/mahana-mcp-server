@@ -16,6 +16,22 @@ export default function Home() {
         <li><strong>get_recent_commands</strong> - Get recently executed commands and results</li>
       </ul>
 
+      <h2>Terminal Session Management</h2>
+      <ul>
+        <li><strong>create_terminal_session</strong> - Create a new terminal tab</li>
+        <li><strong>list_terminal_sessions</strong> - List all active terminal sessions</li>
+        <li><strong>switch_terminal_session</strong> - Switch focus to a different terminal</li>
+        <li><strong>close_terminal_session</strong> - Close a terminal session</li>
+      </ul>
+
+      <h2>Claude Code Agent Tools</h2>
+      <ul>
+        <li><strong>start_claude_agent</strong> - Start a new Claude Code agent in a terminal</li>
+        <li><strong>send_to_claude_agent</strong> - Send message to a running Claude agent</li>
+        <li><strong>get_claude_agent_status</strong> - Get status and recent output from Claude agent</li>
+        <li><strong>list_claude_agents</strong> - List all Claude Code agent sessions</li>
+      </ul>
+
       <h2>Utility Tools</h2>
       <ul>
         <li><strong>get_current_time</strong> - Get current date/time</li>
