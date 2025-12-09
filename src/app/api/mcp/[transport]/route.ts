@@ -522,6 +522,299 @@ const handler = createMcpHandler(
         }
       }
     )
+
+    // =========================================================================
+    // Mahana Toolkit Tools (System Knowledge for Agents)
+    // =========================================================================
+
+    const TOOLKIT_BASE_URL = process.env.TOOLKIT_BASE_URL || 'https://mahana-mapper.vercel.app'
+
+    server.tool(
+      'get_system_toolkit',
+      'Get the complete Mahana system toolkit - APIs, CLI commands, imports, costs, and more. Use this to understand what tools and capabilities are available.',
+      {
+        section: z.enum(['apis', 'cli', 'imports', 'supabase', 'costs', 'transforms', 'pipeline_stages', 'presets', 'data_paths', 'env_vars', 'all']).optional().describe('Specific section to retrieve (default: all)')
+      },
+      async ({ section = 'all' }) => {
+        try {
+          const url = section === 'all'
+            ? `${TOOLKIT_BASE_URL}/api/toolkit`
+            : `${TOOLKIT_BASE_URL}/api/toolkit?section=${section}`
+
+          const response = await fetch(url)
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`)
+          }
+
+          const data = await response.json()
+
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({
+                success: true,
+                section: section,
+                toolkit: data
+              })
+            }]
+          }
+        } catch (err) {
+          return {
+            content: [{ type: 'text', text: `Error fetching toolkit: ${err instanceof Error ? err.message : 'Unknown error'}` }],
+            isError: true
+          }
+        }
+      }
+    )
+
+    server.tool(
+      'get_callable_commands',
+      'Get copy-paste ready code snippets and commands for common Mahana operations. Returns markdown with code blocks that can be executed directly.',
+      {
+        format: z.enum(['markdown', 'json']).optional().describe('Response format - markdown for readable, json for parsed sections')
+      },
+      async ({ format = 'markdown' }) => {
+        try {
+          const url = format === 'json'
+            ? `${TOOLKIT_BASE_URL}/api/toolkit/commands?format=json`
+            : `${TOOLKIT_BASE_URL}/api/toolkit/commands`
+
+          const response = await fetch(url)
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`)
+          }
+
+          const data = format === 'json'
+            ? await response.json()
+            : await response.text()
+
+          return {
+            content: [{
+              type: 'text',
+              text: format === 'json'
+                ? JSON.stringify({ success: true, commands: data })
+                : `# Callable Commands\n\n${data}`
+            }]
+          }
+        } catch (err) {
+          return {
+            content: [{ type: 'text', text: `Error fetching commands: ${err instanceof Error ? err.message : 'Unknown error'}` }],
+            isError: true
+          }
+        }
+      }
+    )
+
+    server.tool(
+      'get_import_statements',
+      'Get all import statements for Mahana packages organized by category. Use this to know exactly what to import when writing code.',
+      {
+        format: z.enum(['typescript', 'json']).optional().describe('Response format - typescript for raw file, json for grouped imports')
+      },
+      async ({ format = 'json' }) => {
+        try {
+          const url = format === 'json'
+            ? `${TOOLKIT_BASE_URL}/api/toolkit/imports?format=json`
+            : `${TOOLKIT_BASE_URL}/api/toolkit/imports`
+
+          const response = await fetch(url)
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`)
+          }
+
+          const data = format === 'json'
+            ? await response.json()
+            : await response.text()
+
+          return {
+            content: [{
+              type: 'text',
+              text: format === 'json'
+                ? JSON.stringify({ success: true, imports: data })
+                : data
+            }]
+          }
+        } catch (err) {
+          return {
+            content: [{ type: 'text', text: `Error fetching imports: ${err instanceof Error ? err.message : 'Unknown error'}` }],
+            isError: true
+          }
+        }
+      }
+    )
+
+    server.tool(
+      'get_api_reference',
+      'Get detailed API endpoint reference for Mahana services. Returns endpoints, methods, parameters, and examples.',
+      {},
+      async () => {
+        try {
+          const response = await fetch(`${TOOLKIT_BASE_URL}/api/toolkit?section=apis`)
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`)
+          }
+
+          const data = await response.json()
+
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({
+                success: true,
+                description: 'Mahana API Endpoints',
+                apis: data.apis
+              })
+            }]
+          }
+        } catch (err) {
+          return {
+            content: [{ type: 'text', text: `Error fetching API reference: ${err instanceof Error ? err.message : 'Unknown error'}` }],
+            isError: true
+          }
+        }
+      }
+    )
+
+    server.tool(
+      'get_cli_reference',
+      'Get all available CLI commands for Mahana. Returns commands organized by category (pipeline, batch, synthesis, utility).',
+      {
+        category: z.enum(['pipeline', 'batch', 'synthesis', 'utility', 'all']).optional().describe('Command category to retrieve')
+      },
+      async ({ category = 'all' }) => {
+        try {
+          const response = await fetch(`${TOOLKIT_BASE_URL}/api/toolkit?section=cli`)
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`)
+          }
+
+          const data = await response.json()
+          const cli = data.cli
+
+          const result = category === 'all'
+            ? cli
+            : { [category]: cli[category] }
+
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({
+                success: true,
+                description: 'Mahana CLI Commands',
+                category: category,
+                commands: result
+              })
+            }]
+          }
+        } catch (err) {
+          return {
+            content: [{ type: 'text', text: `Error fetching CLI reference: ${err instanceof Error ? err.message : 'Unknown error'}` }],
+            isError: true
+          }
+        }
+      }
+    )
+
+    server.tool(
+      'get_cost_reference',
+      'Get cost information for all Mahana operations including AI models, SERP, scraping, geocoding, and full pipeline costs.',
+      {},
+      async () => {
+        try {
+          const response = await fetch(`${TOOLKIT_BASE_URL}/api/toolkit?section=costs`)
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`)
+          }
+
+          const data = await response.json()
+
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({
+                success: true,
+                description: 'Mahana Operation Costs (USD)',
+                costs: data.costs
+              })
+            }]
+          }
+        } catch (err) {
+          return {
+            content: [{ type: 'text', text: `Error fetching cost reference: ${err instanceof Error ? err.message : 'Unknown error'}` }],
+            isError: true
+          }
+        }
+      }
+    )
+
+    server.tool(
+      'get_pipeline_reference',
+      'Get pipeline stage information including function names, costs, and outputs for each stage.',
+      {},
+      async () => {
+        try {
+          const response = await fetch(`${TOOLKIT_BASE_URL}/api/toolkit`)
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`)
+          }
+
+          const data = await response.json()
+
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({
+                success: true,
+                description: 'Mahana Pipeline Stages',
+                stages: data.pipeline_stages,
+                presets: data.presets
+              })
+            }]
+          }
+        } catch (err) {
+          return {
+            content: [{ type: 'text', text: `Error fetching pipeline reference: ${err instanceof Error ? err.message : 'Unknown error'}` }],
+            isError: true
+          }
+        }
+      }
+    )
+
+    server.tool(
+      'lookup_data_path',
+      'Look up file paths for Mahana data storage locations.',
+      {
+        type: z.enum(['golden_records', 'scraped_data', 'text_corpus', 'embeddings', 'all_images', 'brreg_data', 'musicians', 'dossiers']).describe('Type of data path to look up')
+      },
+      async ({ type }) => {
+        try {
+          const response = await fetch(`${TOOLKIT_BASE_URL}/api/toolkit?section=data_paths`)
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`)
+          }
+
+          const data = await response.json()
+          const paths = data.data_paths
+
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({
+                success: true,
+                type: type,
+                path: paths[type],
+                all_paths: paths
+              })
+            }]
+          }
+        } catch (err) {
+          return {
+            content: [{ type: 'text', text: `Error fetching data paths: ${err instanceof Error ? err.message : 'Unknown error'}` }],
+            isError: true
+          }
+        }
+      }
+    )
   },
   {
     // Server metadata - wrapped in serverInfo
