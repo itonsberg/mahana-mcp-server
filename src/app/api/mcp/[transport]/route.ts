@@ -1355,8 +1355,38 @@ const handler = createMcpHandler(
   }
 )
 
-// Export Next.js route handlers
-export { handler as GET, handler as POST }
+// API Key authentication wrapper
+const MCP_API_KEY = process.env.MCP_API_KEY
+
+function withAuth(mcpHandler: (req: Request) => Promise<Response>) {
+  return async (req: Request): Promise<Response> => {
+    // If no API key configured, allow all (dev mode)
+    if (!MCP_API_KEY) {
+      console.warn('[MCP] No MCP_API_KEY configured - running in open mode')
+      return mcpHandler(req)
+    }
+
+    // Check for API key in header
+    const providedKey = req.headers.get('x-api-key') || req.headers.get('authorization')?.replace('Bearer ', '')
+
+    if (providedKey !== MCP_API_KEY) {
+      return new Response(JSON.stringify({
+        jsonrpc: '2.0',
+        error: { code: -32001, message: 'Unauthorized: Invalid or missing API key' },
+        id: null
+      }), {
+        status: 401,
+        headers: { 'Content-Type': 'application/json' }
+      })
+    }
+
+    return mcpHandler(req)
+  }
+}
+
+// Export Next.js route handlers with auth
+export const GET = withAuth(handler)
+export const POST = withAuth(handler)
 
 // Use Node.js runtime (mcp-handler requires node:crypto)
 export const runtime = 'nodejs'
