@@ -3,13 +3,56 @@
  *
  * Provides cloud tools (Supabase, memory, etc.) to ElevenLabs agents.
  * Endpoint: https://mahana-mcp-server.vercel.app/api/mcp
+ *
+ * Architecture (updated 2025-12):
+ *   Voice → MCP → i-View HTTP → Execute → Response (instant)
+ *
+ * i-View Mini provides direct HTTP endpoints at:
+ *   - Dev: http://127.0.0.1:9877
+ *   - Prod: http://127.0.0.1:9876
  */
 
 import { createMcpHandler } from 'mcp-handler'
 import { z } from 'zod'
 import { createClient } from '@supabase/supabase-js'
 
-// Initialize Supabase client
+// i-View Mini HTTP endpoint (local machine)
+const IVIEW_BASE_URL = process.env.IVIEW_BASE_URL || 'http://127.0.0.1:9877'
+
+// Helper to call i-View endpoints
+async function callIView<T = unknown>(
+  endpoint: string,
+  options: { method?: string; body?: unknown } = {}
+): Promise<{ success: boolean; data?: T; error?: string }> {
+  try {
+    const { method = 'GET', body } = options
+    const url = `${IVIEW_BASE_URL}${endpoint}`
+
+    const fetchOptions: RequestInit = {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+    }
+    if (body) {
+      fetchOptions.body = JSON.stringify(body)
+    }
+
+    const response = await fetch(url, fetchOptions)
+    const data = await response.json()
+
+    if (!response.ok) {
+      return { success: false, error: data.error || `HTTP ${response.status}` }
+    }
+
+    return { success: true, data }
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : 'Failed to connect to i-View',
+    }
+  }
+}
+
+// Initialize Supabase client (still used for cloud data, not terminal commands)
 const getSupabase = () => {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY
@@ -224,47 +267,42 @@ const handler = createMcpHandler(
     )
 
     // =========================================================================
-    // Voice-Terminal Bridge Tools
+    // Voice-Terminal Bridge Tools (Direct i-View HTTP)
     // =========================================================================
 
     server.tool(
       'run_terminal_command',
-      'Execute a command in the user\'s terminal. Use this when the user asks to run shell commands, scripts, or interact with the terminal. The command will be queued and executed by the terminal bridge worker.',
+      'Execute a command in the user\'s terminal. Use this when the user asks to run shell commands, scripts, or interact with the terminal. Returns output immediately.',
       {
         command: z.string().describe('The terminal command to execute (e.g., "ls -la", "npm install", "git status")'),
-        intent: z.string().optional().describe('Brief description of what the command does')
+        terminal: z.string().optional().describe('Terminal name, ID (m4-t1), or session ID. Defaults to active terminal.'),
+        wait: z.number().optional().describe('Time in ms to wait for output (default: 1500)')
       },
-      async ({ command, intent }) => {
+      async ({ command, terminal, wait = 1500 }) => {
         try {
-          const supabase = getSupabase()
+          // Call i-View's /quick/run endpoint directly
+          const result = await callIView('/quick/run', {
+            method: 'POST',
+            body: { command, terminal, wait }
+          })
 
-          const { data, error } = await supabase
-            .from('voice_messages_tasks')
-            .insert({
-              command_text: command.trim(),
-              intent: intent || null,
-              status: 'pending',
-              created_at: new Date().toISOString()
-            })
-            .select('id, command_text, status, created_at')
-            .single()
-
-          if (error) {
+          if (!result.success) {
             return {
-              content: [{ type: 'text', text: `Error queueing command: ${error.message}` }],
+              content: [{ type: 'text', text: `Error: ${result.error}` }],
               isError: true
             }
           }
+
+          const data = result.data as { success: boolean; terminal: string; output: string[] }
 
           return {
             content: [{
               type: 'text',
               text: JSON.stringify({
                 success: true,
-                task_id: data.id,
-                command: data.command_text,
-                status: data.status,
-                message: 'Command queued for terminal execution. The terminal will run it shortly.'
+                terminal: data.terminal,
+                output: data.output,
+                message: `Command executed in terminal ${data.terminal}`
               })
             }]
           }
@@ -278,31 +316,19 @@ const handler = createMcpHandler(
     )
 
     server.tool(
-      'check_command_status',
-      'Check the status and result of a previously submitted terminal command.',
+      'get_terminal_output',
+      'Get output from a terminal. Use to see what a command produced or check terminal state.',
       {
-        task_id: z.number().describe('The task ID returned from run_terminal_command')
+        terminal: z.string().optional().describe('Terminal name, ID, or session ID. Defaults to active terminal.'),
+        lines: z.number().optional().describe('Number of lines to return (default: 30)')
       },
-      async ({ task_id }) => {
+      async ({ terminal, lines = 30 }) => {
         try {
-          const supabase = getSupabase()
+          const result = await callIView(`/terminal/output?lines=${lines}${terminal ? `&terminal=${terminal}` : ''}`)
 
-          const { data, error } = await supabase
-            .from('voice_messages_tasks')
-            .select('id, command_text, intent, status, response_data, created_at, processed_at, completed_at')
-            .eq('id', task_id)
-            .single()
-
-          if (error) {
+          if (!result.success) {
             return {
-              content: [{ type: 'text', text: `Error checking status: ${error.message}` }],
-              isError: true
-            }
-          }
-
-          if (!data) {
-            return {
-              content: [{ type: 'text', text: `Task ${task_id} not found` }],
+              content: [{ type: 'text', text: `Error: ${result.error}` }],
               isError: true
             }
           }
@@ -310,18 +336,7 @@ const handler = createMcpHandler(
           return {
             content: [{
               type: 'text',
-              text: JSON.stringify({
-                success: true,
-                task: {
-                  id: data.id,
-                  command: data.command_text,
-                  intent: data.intent,
-                  status: data.status,
-                  result: data.response_data,
-                  created_at: data.created_at,
-                  completed_at: data.completed_at
-                }
-              })
+              text: JSON.stringify(result.data)
             }]
           }
         } catch (err) {
@@ -334,25 +349,16 @@ const handler = createMcpHandler(
     )
 
     server.tool(
-      'get_pending_commands',
-      'Get a list of pending terminal commands that haven\'t been executed yet.',
-      {
-        limit: z.number().optional().describe('Maximum number of commands to return (default: 10)')
-      },
-      async ({ limit = 10 }) => {
+      'get_system_health',
+      'Get system health status including device info, terminals, browser state.',
+      {},
+      async () => {
         try {
-          const supabase = getSupabase()
+          const result = await callIView('/quick/health')
 
-          const { data, error } = await supabase
-            .from('voice_messages_tasks')
-            .select('id, command_text, intent, status, created_at')
-            .eq('status', 'pending')
-            .order('created_at', { ascending: true })
-            .limit(limit)
-
-          if (error) {
+          if (!result.success) {
             return {
-              content: [{ type: 'text', text: `Error fetching pending commands: ${error.message}` }],
+              content: [{ type: 'text', text: `Error: ${result.error}` }],
               isError: true
             }
           }
@@ -360,11 +366,7 @@ const handler = createMcpHandler(
           return {
             content: [{
               type: 'text',
-              text: JSON.stringify({
-                success: true,
-                count: data?.length || 0,
-                pending_commands: data
-              })
+              text: JSON.stringify(result.data)
             }]
           }
         } catch (err) {
@@ -377,31 +379,16 @@ const handler = createMcpHandler(
     )
 
     server.tool(
-      'get_recent_commands',
-      'Get recently executed terminal commands and their results.',
-      {
-        limit: z.number().optional().describe('Maximum number of commands to return (default: 5)'),
-        status: z.enum(['completed', 'failed', 'all']).optional().describe('Filter by status (default: all)')
-      },
-      async ({ limit = 5, status = 'all' }) => {
+      'get_snapshot',
+      'Get a snapshot of the current state: screenshot + console logs + terminal state. Very useful for understanding what\'s happening.',
+      {},
+      async () => {
         try {
-          const supabase = getSupabase()
+          const result = await callIView('/quick/snapshot')
 
-          let query = supabase
-            .from('voice_messages_tasks')
-            .select('id, command_text, intent, status, response_data, created_at, completed_at')
-            .order('created_at', { ascending: false })
-            .limit(limit)
-
-          if (status !== 'all') {
-            query = query.eq('status', status)
-          }
-
-          const { data, error } = await query
-
-          if (error) {
+          if (!result.success) {
             return {
-              content: [{ type: 'text', text: `Error fetching recent commands: ${error.message}` }],
+              content: [{ type: 'text', text: `Error: ${result.error}` }],
               isError: true
             }
           }
@@ -409,18 +396,43 @@ const handler = createMcpHandler(
           return {
             content: [{
               type: 'text',
-              text: JSON.stringify({
-                success: true,
-                count: data?.length || 0,
-                recent_commands: data?.map(cmd => ({
-                  id: cmd.id,
-                  command: cmd.command_text,
-                  status: cmd.status,
-                  result: cmd.response_data,
-                  created_at: cmd.created_at,
-                  completed_at: cmd.completed_at
-                }))
-              })
+              text: JSON.stringify(result.data)
+            }]
+          }
+        } catch (err) {
+          return {
+            content: [{ type: 'text', text: `Error: ${err instanceof Error ? err.message : 'Unknown error'}` }],
+            isError: true
+          }
+        }
+      }
+    )
+
+    server.tool(
+      'broadcast_command',
+      'Send the same command to multiple terminals at once.',
+      {
+        command: z.string().describe('Command to broadcast'),
+        terminals: z.array(z.string()).optional().describe('Array of terminal names/IDs. If empty, sends to all.')
+      },
+      async ({ command, terminals }) => {
+        try {
+          const result = await callIView('/quick/broadcast', {
+            method: 'POST',
+            body: { command, terminals }
+          })
+
+          if (!result.success) {
+            return {
+              content: [{ type: 'text', text: `Error: ${result.error}` }],
+              isError: true
+            }
+          }
+
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify(result.data)
             }]
           }
         } catch (err) {
@@ -433,38 +445,28 @@ const handler = createMcpHandler(
     )
 
     // =========================================================================
-    // Terminal Session Management Tools
+    // Terminal Session Management Tools (Direct i-View HTTP)
     // =========================================================================
 
     server.tool(
       'create_terminal_session',
-      'Create a new terminal session. Use this to spawn a new terminal tab for running Claude Code or other long-running processes.',
+      'Create a new terminal session with optional Claude agent spawn.',
       {
-        name: z.string().describe('Friendly name for the session (e.g., "Claude Agent 1", "Build Server")'),
-        working_directory: z.string().optional().describe('Starting directory for the terminal'),
-        agent_type: z.enum(['claude-code', 'shell', 'npm', 'custom']).optional().describe('Type of agent/process to run')
+        name: z.string().describe('Friendly name for the session (e.g., "Backend Agent", "Build Server")'),
+        workingDirectory: z.string().optional().describe('Starting directory for the terminal'),
+        spawnAgent: z.boolean().optional().describe('Whether to spawn a Claude mini agent in this terminal')
       },
-      async ({ name, working_directory, agent_type = 'shell' }) => {
+      async ({ name, workingDirectory, spawnAgent }) => {
         try {
-          const supabase = getSupabase()
-          const sessionId = `term-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`
+          // Call i-View's /quick/session endpoint directly
+          const result = await callIView('/quick/session', {
+            method: 'POST',
+            body: { name, workingDirectory, spawnAgent }
+          })
 
-          const { data, error } = await supabase
-            .from('terminal_sessions')
-            .insert({
-              id: sessionId,
-              name,
-              working_directory: working_directory || '~',
-              agent_type,
-              status: 'pending',
-              created_at: new Date().toISOString()
-            })
-            .select()
-            .single()
-
-          if (error) {
+          if (!result.success) {
             return {
-              content: [{ type: 'text', text: `Error creating session: ${error.message}` }],
+              content: [{ type: 'text', text: `Error: ${result.error}` }],
               isError: true
             }
           }
@@ -474,10 +476,8 @@ const handler = createMcpHandler(
               type: 'text',
               text: JSON.stringify({
                 success: true,
-                session_id: data.id,
-                name: data.name,
-                status: 'pending',
-                message: 'Terminal session created. i-View will spawn the terminal shortly.'
+                ...result.data,
+                message: `Session "${name}" created${spawnAgent ? ' with Claude mini' : ''}`
               })
             }]
           }
@@ -491,456 +491,459 @@ const handler = createMcpHandler(
     )
 
     server.tool(
-      'list_terminal_sessions',
-      'List all active terminal sessions. Shows Claude Code agents and other terminals.',
-      {
-        status: z.enum(['active', 'pending', 'closed', 'all']).optional().describe('Filter by session status')
-      },
-      async ({ status = 'active' }) => {
-        try {
-          const supabase = getSupabase()
-
-          let query = supabase
-            .from('terminal_sessions')
-            .select('*')
-            .order('created_at', { ascending: false })
-            .limit(20)
-
-          if (status !== 'all') {
-            query = query.eq('status', status)
-          }
-
-          const { data, error } = await query
-
-          if (error) {
-            return {
-              content: [{ type: 'text', text: `Error listing sessions: ${error.message}` }],
-              isError: true
-            }
-          }
-
-          return {
-            content: [{
-              type: 'text',
-              text: JSON.stringify({
-                success: true,
-                count: data?.length || 0,
-                sessions: data?.map(s => ({
-                  id: s.id,
-                  name: s.name,
-                  agent_type: s.agent_type,
-                  status: s.status,
-                  working_directory: s.working_directory,
-                  created_at: s.created_at,
-                  last_activity: s.last_activity_at
-                }))
-              })
-            }]
-          }
-        } catch (err) {
-          return {
-            content: [{ type: 'text', text: `Error: ${err instanceof Error ? err.message : 'Unknown error'}` }],
-            isError: true
-          }
-        }
-      }
-    )
-
-    server.tool(
-      'switch_terminal_session',
-      'Switch focus to a different terminal session. Makes that terminal the active one for commands.',
-      {
-        session_id: z.string().describe('The session ID to switch to')
-      },
-      async ({ session_id }) => {
-        try {
-          const supabase = getSupabase()
-
-          // Update the session to mark it as the active focus
-          const { data, error } = await supabase
-            .from('terminal_sessions')
-            .update({
-              is_focused: true,
-              last_activity_at: new Date().toISOString()
-            })
-            .eq('id', session_id)
-            .select()
-            .single()
-
-          if (error) {
-            return {
-              content: [{ type: 'text', text: `Error switching session: ${error.message}` }],
-              isError: true
-            }
-          }
-
-          // Queue a switch action for i-View to pick up
-          await supabase
-            .from('voice_messages_tasks')
-            .insert({
-              command_text: `__SWITCH_SESSION__:${session_id}`,
-              intent: 'switch_terminal',
-              parameters: { session_id, action: 'switch' },
-              status: 'pending',
-              created_at: new Date().toISOString()
-            })
-
-          return {
-            content: [{
-              type: 'text',
-              text: JSON.stringify({
-                success: true,
-                session_id,
-                name: data?.name,
-                message: `Switched to terminal session: ${data?.name || session_id}`
-              })
-            }]
-          }
-        } catch (err) {
-          return {
-            content: [{ type: 'text', text: `Error: ${err instanceof Error ? err.message : 'Unknown error'}` }],
-            isError: true
-          }
-        }
-      }
-    )
-
-    server.tool(
-      'close_terminal_session',
-      'Close a terminal session. This will terminate any running processes in that terminal.',
-      {
-        session_id: z.string().describe('The session ID to close')
-      },
-      async ({ session_id }) => {
-        try {
-          const supabase = getSupabase()
-
-          const { error } = await supabase
-            .from('terminal_sessions')
-            .update({
-              status: 'closed',
-              closed_at: new Date().toISOString()
-            })
-            .eq('id', session_id)
-
-          if (error) {
-            return {
-              content: [{ type: 'text', text: `Error closing session: ${error.message}` }],
-              isError: true
-            }
-          }
-
-          // Queue a close action for i-View
-          await supabase
-            .from('voice_messages_tasks')
-            .insert({
-              command_text: `__CLOSE_SESSION__:${session_id}`,
-              intent: 'close_terminal',
-              parameters: { session_id, action: 'close' },
-              status: 'pending',
-              created_at: new Date().toISOString()
-            })
-
-          return {
-            content: [{
-              type: 'text',
-              text: JSON.stringify({
-                success: true,
-                session_id,
-                message: 'Terminal session marked for closure.'
-              })
-            }]
-          }
-        } catch (err) {
-          return {
-            content: [{ type: 'text', text: `Error: ${err instanceof Error ? err.message : 'Unknown error'}` }],
-            isError: true
-          }
-        }
-      }
-    )
-
-    // =========================================================================
-    // Claude Code Agent Tools
-    // =========================================================================
-
-    server.tool(
-      'start_claude_agent',
-      'Start a new Claude Code agent in a terminal session. This creates a new terminal and launches Claude Code with optional initial prompt.',
-      {
-        name: z.string().describe('Name for this Claude agent instance (e.g., "Backend Agent", "UI Agent")'),
-        working_directory: z.string().optional().describe('Project directory to start in'),
-        initial_prompt: z.string().optional().describe('Initial task/prompt to give Claude Code'),
-        model: z.enum(['sonnet', 'opus', 'haiku']).optional().describe('Claude model to use (default: sonnet)')
-      },
-      async ({ name, working_directory, initial_prompt, model = 'sonnet' }) => {
-        try {
-          const supabase = getSupabase()
-          const sessionId = `claude-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`
-
-          // Create the session record
-          const { data: session, error: sessionError } = await supabase
-            .from('terminal_sessions')
-            .insert({
-              id: sessionId,
-              name,
-              working_directory: working_directory || '~',
-              agent_type: 'claude-code',
-              status: 'pending',
-              metadata: { model, initial_prompt },
-              created_at: new Date().toISOString()
-            })
-            .select()
-            .single()
-
-          if (sessionError) {
-            return {
-              content: [{ type: 'text', text: `Error creating Claude session: ${sessionError.message}` }],
-              isError: true
-            }
-          }
-
-          // Build the claude command
-          let claudeCmd = 'claude'
-          if (model && model !== 'sonnet') {
-            claudeCmd += ` --model ${model}`
-          }
-          if (initial_prompt) {
-            // Escape the prompt for shell
-            const escapedPrompt = initial_prompt.replace(/'/g, "'\\''")
-            claudeCmd += ` '${escapedPrompt}'`
-          }
-
-          // Queue the command to start Claude
-          await supabase
-            .from('voice_messages_tasks')
-            .insert({
-              command_text: `__START_CLAUDE__:${sessionId}`,
-              intent: 'start_claude_agent',
-              parameters: {
-                session_id: sessionId,
-                action: 'start_claude',
-                working_directory,
-                claude_command: claudeCmd,
-                model,
-                initial_prompt
-              },
-              status: 'pending',
-              session_id: sessionId,
-              created_at: new Date().toISOString()
-            })
-
-          return {
-            content: [{
-              type: 'text',
-              text: JSON.stringify({
-                success: true,
-                session_id: sessionId,
-                name,
-                model,
-                message: `Claude Code agent "${name}" is starting. It will be ready shortly.`,
-                initial_prompt: initial_prompt ? 'Provided' : 'None'
-              })
-            }]
-          }
-        } catch (err) {
-          return {
-            content: [{ type: 'text', text: `Error: ${err instanceof Error ? err.message : 'Unknown error'}` }],
-            isError: true
-          }
-        }
-      }
-    )
-
-    server.tool(
-      'send_to_claude_agent',
-      'Send a message or command to a running Claude Code agent.',
-      {
-        session_id: z.string().describe('The Claude agent session ID'),
-        message: z.string().describe('Message or instruction to send to Claude')
-      },
-      async ({ session_id, message }) => {
-        try {
-          const supabase = getSupabase()
-
-          // Verify the session exists and is a Claude agent
-          const { data: session, error: sessionError } = await supabase
-            .from('terminal_sessions')
-            .select('*')
-            .eq('id', session_id)
-            .single()
-
-          if (sessionError || !session) {
-            return {
-              content: [{ type: 'text', text: `Session not found: ${session_id}` }],
-              isError: true
-            }
-          }
-
-          // Queue the message as a command
-          const { data, error } = await supabase
-            .from('voice_messages_tasks')
-            .insert({
-              command_text: message,
-              intent: 'claude_message',
-              parameters: {
-                session_id,
-                action: 'send_message',
-                target: 'claude-code'
-              },
-              status: 'pending',
-              session_id,
-              created_at: new Date().toISOString()
-            })
-            .select()
-            .single()
-
-          if (error) {
-            return {
-              content: [{ type: 'text', text: `Error sending message: ${error.message}` }],
-              isError: true
-            }
-          }
-
-          // Update session activity
-          await supabase
-            .from('terminal_sessions')
-            .update({ last_activity_at: new Date().toISOString() })
-            .eq('id', session_id)
-
-          return {
-            content: [{
-              type: 'text',
-              text: JSON.stringify({
-                success: true,
-                task_id: data.id,
-                session_id,
-                session_name: session.name,
-                message: `Message sent to Claude agent "${session.name}".`
-              })
-            }]
-          }
-        } catch (err) {
-          return {
-            content: [{ type: 'text', text: `Error: ${err instanceof Error ? err.message : 'Unknown error'}` }],
-            isError: true
-          }
-        }
-      }
-    )
-
-    server.tool(
-      'get_claude_agent_status',
-      'Get the current status and recent output from a Claude Code agent.',
-      {
-        session_id: z.string().describe('The Claude agent session ID')
-      },
-      async ({ session_id }) => {
-        try {
-          const supabase = getSupabase()
-
-          // Get session info
-          const { data: session, error: sessionError } = await supabase
-            .from('terminal_sessions')
-            .select('*')
-            .eq('id', session_id)
-            .single()
-
-          if (sessionError || !session) {
-            return {
-              content: [{ type: 'text', text: `Session not found: ${session_id}` }],
-              isError: true
-            }
-          }
-
-          // Get recent commands/output for this session
-          const { data: recentTasks } = await supabase
-            .from('voice_messages_tasks')
-            .select('*')
-            .eq('session_id', session_id)
-            .order('created_at', { ascending: false })
-            .limit(5)
-
-          return {
-            content: [{
-              type: 'text',
-              text: JSON.stringify({
-                success: true,
-                session: {
-                  id: session.id,
-                  name: session.name,
-                  status: session.status,
-                  agent_type: session.agent_type,
-                  working_directory: session.working_directory,
-                  model: session.metadata?.model,
-                  created_at: session.created_at,
-                  last_activity: session.last_activity_at
-                },
-                recent_activity: recentTasks?.map(t => ({
-                  id: t.id,
-                  command: t.command_text?.substring(0, 100),
-                  status: t.status,
-                  has_result: !!t.response_data,
-                  created_at: t.created_at
-                }))
-              })
-            }]
-          }
-        } catch (err) {
-          return {
-            content: [{ type: 'text', text: `Error: ${err instanceof Error ? err.message : 'Unknown error'}` }],
-            isError: true
-          }
-        }
-      }
-    )
-
-    server.tool(
-      'list_claude_agents',
-      'List all Claude Code agent sessions, both active and recent.',
+      'list_terminals',
+      'List all active terminals with their state (sleeping, working, waiting, error).',
       {},
       async () => {
         try {
-          const supabase = getSupabase()
+          const result = await callIView('/quick/terminals')
 
-          const { data, error } = await supabase
-            .from('terminal_sessions')
-            .select('*')
-            .eq('agent_type', 'claude-code')
-            .order('created_at', { ascending: false })
-            .limit(10)
-
-          if (error) {
+          if (!result.success) {
             return {
-              content: [{ type: 'text', text: `Error listing agents: ${error.message}` }],
+              content: [{ type: 'text', text: `Error: ${result.error}` }],
               isError: true
             }
           }
 
-          const active = data?.filter(s => s.status === 'active') || []
-          const pending = data?.filter(s => s.status === 'pending') || []
-          const closed = data?.filter(s => s.status === 'closed') || []
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify(result.data)
+            }]
+          }
+        } catch (err) {
+          return {
+            content: [{ type: 'text', text: `Error: ${err instanceof Error ? err.message : 'Unknown error'}` }],
+            isError: true
+          }
+        }
+      }
+    )
+
+    server.tool(
+      'list_sessions',
+      'List all sessions with neuropacket counts and memory status.',
+      {},
+      async () => {
+        try {
+          const result = await callIView('/quick/sessions')
+
+          if (!result.success) {
+            return {
+              content: [{ type: 'text', text: `Error: ${result.error}` }],
+              isError: true
+            }
+          }
+
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify(result.data)
+            }]
+          }
+        } catch (err) {
+          return {
+            content: [{ type: 'text', text: `Error: ${err instanceof Error ? err.message : 'Unknown error'}` }],
+            isError: true
+          }
+        }
+      }
+    )
+
+    server.tool(
+      'delete_session',
+      'Delete a session by name or ID.',
+      {
+        name: z.string().optional().describe('Session name to delete'),
+        sessionId: z.string().optional().describe('Session ID to delete')
+      },
+      async ({ name, sessionId }) => {
+        try {
+          const params = new URLSearchParams()
+          if (name) params.set('name', name)
+          if (sessionId) params.set('id', sessionId)
+
+          const result = await callIView(`/quick/session?${params.toString()}`, {
+            method: 'DELETE'
+          })
+
+          if (!result.success) {
+            return {
+              content: [{ type: 'text', text: `Error: ${result.error}` }],
+              isError: true
+            }
+          }
+
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify(result.data)
+            }]
+          }
+        } catch (err) {
+          return {
+            content: [{ type: 'text', text: `Error: ${err instanceof Error ? err.message : 'Unknown error'}` }],
+            isError: true
+          }
+        }
+      }
+    )
+
+    server.tool(
+      'get_session_memory',
+      'Get compiled session memory (SESSION_MEMORY.md) for a terminal.',
+      {
+        terminal: z.string().optional().describe('Terminal name, ID, or session ID')
+      },
+      async ({ terminal }) => {
+        try {
+          const result = await callIView(`/quick/memory${terminal ? `?terminal=${terminal}` : ''}`)
+
+          if (!result.success) {
+            return {
+              content: [{ type: 'text', text: `Error: ${result.error}` }],
+              isError: true
+            }
+          }
+
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify(result.data)
+            }]
+          }
+        } catch (err) {
+          return {
+            content: [{ type: 'text', text: `Error: ${err instanceof Error ? err.message : 'Unknown error'}` }],
+            isError: true
+          }
+        }
+      }
+    )
+
+    // =========================================================================
+    // Claude Code Agent Tools (Direct i-View HTTP)
+    // =========================================================================
+
+    server.tool(
+      'spawn_claude_mini',
+      'Spawn a Claude mini agent (--dangerously-skip-permissions) in a terminal. Instant and ready for commands.',
+      {
+        terminal: z.string().optional().describe('Terminal name, ID, or session ID. Uses active terminal if not specified.'),
+        cwd: z.string().optional().describe('Working directory to start in'),
+        firstMessage: z.string().optional().describe('Initial message to send to Claude after startup'),
+        waitForReady: z.number().optional().describe('Time in ms to wait for Claude to be ready (default: 3000)')
+      },
+      async ({ terminal, cwd, firstMessage, waitForReady }) => {
+        try {
+          // Call i-View's /quick/mini endpoint directly
+          const result = await callIView('/quick/mini', {
+            method: 'POST',
+            body: { terminal, cwd, firstMessage, waitForReady }
+          })
+
+          if (!result.success) {
+            return {
+              content: [{ type: 'text', text: `Error: ${result.error}` }],
+              isError: true
+            }
+          }
 
           return {
             content: [{
               type: 'text',
               text: JSON.stringify({
                 success: true,
-                summary: {
-                  active: active.length,
-                  pending: pending.length,
-                  closed: closed.length
-                },
-                agents: data?.map(s => ({
-                  id: s.id,
-                  name: s.name,
-                  status: s.status,
-                  model: s.metadata?.model || 'sonnet',
-                  working_directory: s.working_directory,
-                  created_at: s.created_at,
-                  last_activity: s.last_activity_at
-                }))
+                ...result.data,
+                message: 'Claude mini spawned and ready'
               })
+            }]
+          }
+        } catch (err) {
+          return {
+            content: [{ type: 'text', text: `Error: ${err instanceof Error ? err.message : 'Unknown error'}` }],
+            isError: true
+          }
+        }
+      }
+    )
+
+    server.tool(
+      'send_to_agent',
+      'Send a message to a running Claude agent. Supports different modes: prompt (existing Claude), mini (spawn mini), claude (spawn standard).',
+      {
+        message: z.string().describe('Message to send to Claude'),
+        terminal: z.string().optional().describe('Terminal name, ID, or session ID'),
+        mode: z.enum(['prompt', 'mini', 'claude']).optional().describe('Mode: prompt (existing), mini (spawn mini), claude (spawn standard). Default: prompt')
+      },
+      async ({ message, terminal, mode = 'prompt' }) => {
+        try {
+          // Call i-View's /quick/agent endpoint directly
+          const result = await callIView('/quick/agent', {
+            method: 'POST',
+            body: { message, terminal, mode }
+          })
+
+          if (!result.success) {
+            return {
+              content: [{ type: 'text', text: `Error: ${result.error}` }],
+              isError: true
+            }
+          }
+
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({
+                success: true,
+                ...result.data,
+                message: `Message sent to Claude agent`
+              })
+            }]
+          }
+        } catch (err) {
+          return {
+            content: [{ type: 'text', text: `Error: ${err instanceof Error ? err.message : 'Unknown error'}` }],
+            isError: true
+          }
+        }
+      }
+    )
+
+    server.tool(
+      'list_agents',
+      'List all Claude agents across terminals with their current state.',
+      {},
+      async () => {
+        try {
+          const result = await callIView('/quick/agents')
+
+          if (!result.success) {
+            return {
+              content: [{ type: 'text', text: `Error: ${result.error}` }],
+              isError: true
+            }
+          }
+
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify(result.data)
+            }]
+          }
+        } catch (err) {
+          return {
+            content: [{ type: 'text', text: `Error: ${err instanceof Error ? err.message : 'Unknown error'}` }],
+            isError: true
+          }
+        }
+      }
+    )
+
+    // =========================================================================
+    // Browser Automation Tools (Direct i-View HTTP)
+    // =========================================================================
+
+    server.tool(
+      'navigate_browser',
+      'Navigate the browser to a URL.',
+      {
+        url: z.string().describe('URL to navigate to')
+      },
+      async ({ url }) => {
+        try {
+          const result = await callIView('/navigate', {
+            method: 'POST',
+            body: { url }
+          })
+
+          if (!result.success) {
+            return {
+              content: [{ type: 'text', text: `Error: ${result.error}` }],
+              isError: true
+            }
+          }
+
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({
+                success: true,
+                ...result.data,
+                message: `Navigated to ${url}`
+              })
+            }]
+          }
+        } catch (err) {
+          return {
+            content: [{ type: 'text', text: `Error: ${err instanceof Error ? err.message : 'Unknown error'}` }],
+            isError: true
+          }
+        }
+      }
+    )
+
+    server.tool(
+      'click_element',
+      'Click an element in the browser by selector or text.',
+      {
+        selector: z.string().optional().describe('CSS selector to click'),
+        text: z.string().optional().describe('Text content to find and click')
+      },
+      async ({ selector, text }) => {
+        try {
+          const result = await callIView('/webview/click', {
+            method: 'POST',
+            body: { selector, text }
+          })
+
+          if (!result.success) {
+            return {
+              content: [{ type: 'text', text: `Error: ${result.error}` }],
+              isError: true
+            }
+          }
+
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify(result.data)
+            }]
+          }
+        } catch (err) {
+          return {
+            content: [{ type: 'text', text: `Error: ${err instanceof Error ? err.message : 'Unknown error'}` }],
+            isError: true
+          }
+        }
+      }
+    )
+
+    server.tool(
+      'fill_input',
+      'Fill an input field in the browser.',
+      {
+        selector: z.string().describe('CSS selector for the input'),
+        value: z.string().describe('Value to fill')
+      },
+      async ({ selector, value }) => {
+        try {
+          const result = await callIView('/webview/fill', {
+            method: 'POST',
+            body: { selector, value }
+          })
+
+          if (!result.success) {
+            return {
+              content: [{ type: 'text', text: `Error: ${result.error}` }],
+              isError: true
+            }
+          }
+
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify(result.data)
+            }]
+          }
+        } catch (err) {
+          return {
+            content: [{ type: 'text', text: `Error: ${err instanceof Error ? err.message : 'Unknown error'}` }],
+            isError: true
+          }
+        }
+      }
+    )
+
+    server.tool(
+      'take_screenshot',
+      'Take a screenshot of the current browser view. Returns base64 encoded image.',
+      {
+        preset: z.enum(['fast', 'balanced', 'thumbnail', 'quality']).optional().describe('Screenshot preset (default: fast)')
+      },
+      async ({ preset = 'fast' }) => {
+        try {
+          const result = await callIView(`/screenshot/webview?preset=${preset}`)
+
+          if (!result.success) {
+            return {
+              content: [{ type: 'text', text: `Error: ${result.error}` }],
+              isError: true
+            }
+          }
+
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify(result.data)
+            }]
+          }
+        } catch (err) {
+          return {
+            content: [{ type: 'text', text: `Error: ${err instanceof Error ? err.message : 'Unknown error'}` }],
+            isError: true
+          }
+        }
+      }
+    )
+
+    server.tool(
+      'get_console_logs',
+      'Get console logs from the browser.',
+      {
+        level: z.enum(['all', 'error', 'warn', 'log']).optional().describe('Filter by log level')
+      },
+      async ({ level = 'all' }) => {
+        try {
+          const result = await callIView(`/webview/console${level !== 'all' ? `?level=${level}` : ''}`)
+
+          if (!result.success) {
+            return {
+              content: [{ type: 'text', text: `Error: ${result.error}` }],
+              isError: true
+            }
+          }
+
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify(result.data)
+            }]
+          }
+        } catch (err) {
+          return {
+            content: [{ type: 'text', text: `Error: ${err instanceof Error ? err.message : 'Unknown error'}` }],
+            isError: true
+          }
+        }
+      }
+    )
+
+    server.tool(
+      'query_elements',
+      'Query elements in the browser by selector.',
+      {
+        selector: z.string().describe('CSS selector to query'),
+        limit: z.number().optional().describe('Maximum elements to return')
+      },
+      async ({ selector, limit }) => {
+        try {
+          const params = new URLSearchParams({ selector })
+          if (limit) params.set('limit', limit.toString())
+
+          const result = await callIView(`/webview/elements?${params.toString()}`)
+
+          if (!result.success) {
+            return {
+              content: [{ type: 'text', text: `Error: ${result.error}` }],
+              isError: true
+            }
+          }
+
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify(result.data)
             }]
           }
         } catch (err) {
