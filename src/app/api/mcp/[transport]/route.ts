@@ -476,7 +476,7 @@ const handler = createMcpHandler(
               type: 'text',
               text: JSON.stringify({
                 success: true,
-                ...result.data,
+                ...(result.data && typeof result.data === 'object' ? result.data : {}),
                 message: `Session "${name}" created${spawnAgent ? ' with Claude mini' : ''}`
               })
             }]
@@ -654,7 +654,7 @@ const handler = createMcpHandler(
               type: 'text',
               text: JSON.stringify({
                 success: true,
-                ...result.data,
+                ...(result.data && typeof result.data === 'object' ? result.data : {}),
                 message: 'Claude mini spawned and ready'
               })
             }]
@@ -696,7 +696,7 @@ const handler = createMcpHandler(
               type: 'text',
               text: JSON.stringify({
                 success: true,
-                ...result.data,
+                ...(result.data && typeof result.data === 'object' ? result.data : {}),
                 message: `Message sent to Claude agent`
               })
             }]
@@ -769,7 +769,7 @@ const handler = createMcpHandler(
               type: 'text',
               text: JSON.stringify({
                 success: true,
-                ...result.data,
+                ...(result.data && typeof result.data === 'object' ? result.data : {}),
                 message: `Navigated to ${url}`
               })
             }]
