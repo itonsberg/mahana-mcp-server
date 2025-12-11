@@ -1368,7 +1368,7 @@ function withAuth(mcpHandler: (req: Request) => Promise<Response>) {
       return mcpHandler(req)
     }
 
-    // Check for API key in header
+    // Check for API key in header (x-api-key or Bearer token)
     const providedKey = req.headers.get('x-api-key') || req.headers.get('authorization')?.replace('Bearer ', '')
 
     if (providedKey !== apiKey) {
