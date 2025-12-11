@@ -1356,12 +1356,14 @@ const handler = createMcpHandler(
 )
 
 // API Key authentication wrapper
-const MCP_API_KEY = process.env.MCP_API_KEY
-
+// NOTE: Must read env var at runtime, not at module load time (for Vercel serverless)
 function withAuth(mcpHandler: (req: Request) => Promise<Response>) {
   return async (req: Request): Promise<Response> => {
+    // Read at runtime to get the actual deployed env var
+    const apiKey = process.env.MCP_API_KEY
+
     // If no API key configured, allow all (dev mode)
-    if (!MCP_API_KEY) {
+    if (!apiKey) {
       console.warn('[MCP] No MCP_API_KEY configured - running in open mode')
       return mcpHandler(req)
     }
@@ -1369,7 +1371,7 @@ function withAuth(mcpHandler: (req: Request) => Promise<Response>) {
     // Check for API key in header
     const providedKey = req.headers.get('x-api-key') || req.headers.get('authorization')?.replace('Bearer ', '')
 
-    if (providedKey !== MCP_API_KEY) {
+    if (providedKey !== apiKey) {
       return new Response(JSON.stringify({
         jsonrpc: '2.0',
         error: { code: -32001, message: 'Unauthorized: Invalid or missing API key' },
